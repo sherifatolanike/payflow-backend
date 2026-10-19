@@ -7,15 +7,6 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
-- **Configurable database connection pool.** The store opens every SQLite
-  projection through a bounded pool of connections. `DATABASE_MAX_CONNS` caps
-  the connections a database file may have open and `DATABASE_MIN_CONNS` is
-  how many are opened at startup and kept open; unset, the service keeps the
-  single connection it has always used. A value that is not a positive whole
-  number, or a minimum above the maximum, is a startup error. A network can
-  size its own pool with `<NAME>_DATABASE_MAX_CONNS` and
-  `<NAME>_DATABASE_MIN_CONNS`, which win over the global values. The README
-  documents the two, how to size them and where the size comes from.
 - **Parallel settlement with keeper channel accounts (#36).** Extra signing
   accounts listed in `KEEPER_CHANNEL_SECRETS` become parallel settlement
   channels: due mandates are pulled from one shared queue by one worker per

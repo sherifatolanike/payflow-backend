@@ -33,8 +33,6 @@ function net(overrides: Partial<NetworkConfig> = {}): NetworkConfig {
     subscriptionId: CONTRACT,
     startLedger: 0,
     databasePath: ":memory:",
-    maxConns: 1,
-    minConns: 1,
     ...overrides,
   };
 }

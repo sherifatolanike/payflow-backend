@@ -199,8 +199,6 @@ export function createApp(
           defaultToken: config.TOKEN_ID,
           startLedger: config.INDEXER_START_LEDGER ?? 0,
           databasePath: config.DATABASE_PATH ?? ":memory:",
-          maxConns: config.DATABASE_MAX_CONNS ?? 1,
-          minConns: config.DATABASE_MIN_CONNS ?? 1,
         },
         db,
         indexer,

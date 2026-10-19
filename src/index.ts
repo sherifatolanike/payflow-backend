@@ -1,5 +1,5 @@
 import { loadConfig, networkConfigs } from "./config.ts";
-import { openDatabasePool } from "./lib/db.ts";
+import { openDatabase } from "./lib/db.ts";
 import { makeRpc } from "./lib/stellar.ts";
 import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { createApp } from "./app.ts";
@@ -18,14 +18,9 @@ const networks = networkConfigs(config);
 // One indexer and one database per network, so cursors and projections never
 // mix. `runtimes[0]` is the default network: it serves the unprefixed routes.
 const runtimes = networks.map((network) => {
-  const pool = openDatabasePool(network.databasePath, {
-    min: network.minConns,
-    max: network.maxConns,
-  });
+  const db = openDatabase(network.databasePath);
   const server = makeRpc(network);
-  // The API reads through the shared connection; the indexer takes a
-  // connection of its own, so a pass never shares a handle with API traffic.
-  const indexer = new Indexer(pool.acquire(), server, network);
+  const indexer = new Indexer(db, server, network);
   const runPass = serial(async () => {
     try {
       const r = await withSpan(`indexer.pass.${network.name}`, () => indexer.tick());
@@ -50,7 +45,7 @@ const runtimes = networks.map((network) => {
   // Re-reads a sample of active mandates from the contract and repairs any
   // drift the indexer missed (RPC gap, bug, outage mid-range).
   const reconciler = new Reconciler(
-    pool.acquire(),
+    db,
     server,
     network.subscriptionId,
     network.networkPassphrase,
@@ -59,12 +54,12 @@ const runtimes = networks.map((network) => {
     // serves the corrected projection instead of a stale cache entry.
     (merchant) => indexer.merchantCache.invalidate(merchant),
   );
-  return { network, pool, db: pool.shared, server, indexer, runPass, tokens, reconciler };
+  return { network, db, server, indexer, runPass, tokens, reconciler };
 });
 const defaultRuntime = runtimes[0]!;
 
 const keeper = config.KEEPER_ENABLED
-  ? new Keeper(defaultRuntime.pool.acquire(), defaultRuntime.server, config)
+  ? new Keeper(defaultRuntime.db, defaultRuntime.server, config)
   : undefined;
 const activeKeeper = keeper;
 if (keeper) {
@@ -139,13 +134,6 @@ const http = app.listen(config.PORT, () => {
     "api listening",
   );
 });
-
-for (const rt of runtimes) {
-  logger.info(
-    { network: rt.network.name, pool: rt.pool.stats() },
-    "database pool ready",
-  );
-}
 
 const loops: Loop[] = [];
 
@@ -240,7 +228,7 @@ async function shutdown(signal: string): Promise<void> {
   if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
   await stopTelemetry().catch(() => {});
   http.close(() => {
-    for (const rt of runtimes) rt.pool.close();
+    for (const rt of runtimes) rt.db.close();
     process.exit(0);
   });
 }
