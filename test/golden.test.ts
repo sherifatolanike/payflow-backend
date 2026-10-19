@@ -47,6 +47,8 @@ const testnet: NetworkConfig = {
   subscriptionId: "C".repeat(56),
   startLedger: 0,
   databasePath: ":memory:",
+  maxConns: 1,
+  minConns: 1,
 };
 const config = { CORS_ORIGIN: "*" } as unknown as Config;
 

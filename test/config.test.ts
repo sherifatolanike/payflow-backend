@@ -11,6 +11,18 @@ const BASE = {
   SUBSCRIPTION_ID: VALID_CONTRACT_ID,
 };
 
+const ID = VALID_CONTRACT_ID;
+
+/** Environment holding only what the default network needs. */
+function env(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return {
+    PLAN_REGISTRY_ID: ID,
+    VAULT_ID: ID,
+    SUBSCRIPTION_ID: ID,
+    ...overrides,
+  };
+}
+
 describe("soroban rpc endpoints", () => {
   test("defaults to the public testnet endpoint when unset", () => {
     assert.deepEqual(loadConfig({ ...BASE }).SOROBAN_RPC_URL, [
@@ -129,17 +141,107 @@ describe("keeper inclusion fee configuration", () => {
   });
 });
 
-const ID = VALID_CONTRACT_ID;
+describe("database connection pool", () => {
+  test("one connection per database when the size is unset", () => {
+    const config = loadConfig(env());
+    assert.equal(config.DATABASE_MAX_CONNS, 1);
+    assert.equal(config.DATABASE_MIN_CONNS, 1);
+  });
 
-/** Environment holding only what the default network needs. */
-function env(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return {
-    PLAN_REGISTRY_ID: ID,
-    VAULT_ID: ID,
-    SUBSCRIPTION_ID: ID,
-    ...overrides,
-  };
-}
+  test("the pool size is read from the environment", () => {
+    const config = loadConfig(env({ DATABASE_MAX_CONNS: "4", DATABASE_MIN_CONNS: "2" }));
+    assert.equal(config.DATABASE_MAX_CONNS, 4);
+    assert.equal(config.DATABASE_MIN_CONNS, 2);
+  });
+
+  test("a pool size that is not a number is a startup error", () => {
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "many" })),
+      /DATABASE_MAX_CONNS: must be a number/,
+    );
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MIN_CONNS: "many" })),
+      /DATABASE_MIN_CONNS: must be a number/,
+    );
+  });
+
+  test("a pool size outside the allowed range is a startup error", () => {
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "0" })),
+      /DATABASE_MAX_CONNS: must be at least 1/,
+    );
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "-1" })),
+      /DATABASE_MAX_CONNS: must be at least 1/,
+    );
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "1.5" })),
+      /DATABASE_MAX_CONNS: must be a whole number/,
+    );
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "1000" })),
+      /DATABASE_MAX_CONNS: must be at most 64/,
+    );
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MIN_CONNS: "0" })),
+      /DATABASE_MIN_CONNS: must be at least 1/,
+    );
+  });
+
+  test("more connections kept open than allowed is a startup error", () => {
+    assert.throws(
+      () => loadConfig(env({ DATABASE_MAX_CONNS: "2", DATABASE_MIN_CONNS: "3" })),
+      /DATABASE_MIN_CONNS \(3\) must not be greater than DATABASE_MAX_CONNS \(2\)/,
+    );
+  });
+
+  test("the global pool size applies to every network", () => {
+    const config = loadConfig(env({ DATABASE_MAX_CONNS: "3" }));
+    const networks = networkConfigs(config, env({ DATABASE_MAX_CONNS: "3" }));
+    assert.equal(networks[0]!.maxConns, 3);
+    assert.equal(networks[0]!.minConns, 1);
+  });
+
+  test("a network's own pool size wins over the global one", () => {
+    const overrides = {
+      NETWORKS: "mainnet",
+      DATABASE_MAX_CONNS: "3",
+      DATABASE_MIN_CONNS: "2",
+      MAINNET_SOROBAN_RPC_URL: "https://mainnet.sorobanrpc.example",
+      MAINNET_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+      MAINNET_PLAN_REGISTRY_ID: ID,
+      MAINNET_VAULT_ID: ID,
+      MAINNET_SUBSCRIPTION_ID: ID,
+      MAINNET_DATABASE_MAX_CONNS: "5",
+      MAINNET_DATABASE_MIN_CONNS: "4",
+    };
+    const config = loadConfig(env(overrides));
+    const networks = networkConfigs(config, env(overrides));
+
+    assert.equal(networks[0]!.maxConns, 3);
+    assert.equal(networks[0]!.minConns, 2);
+    assert.equal(networks[1]!.maxConns, 5);
+    assert.equal(networks[1]!.minConns, 4);
+  });
+
+  test("a network's own pool size that makes no sense is a startup error", () => {
+    const overrides = {
+      NETWORKS: "mainnet",
+      MAINNET_SOROBAN_RPC_URL: "https://mainnet.sorobanrpc.example",
+      MAINNET_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+      MAINNET_PLAN_REGISTRY_ID: ID,
+      MAINNET_VAULT_ID: ID,
+      MAINNET_SUBSCRIPTION_ID: ID,
+      MAINNET_DATABASE_MAX_CONNS: "1",
+      MAINNET_DATABASE_MIN_CONNS: "2",
+    };
+    const config = loadConfig(env(overrides));
+    assert.throws(
+      () => networkConfigs(config, env(overrides)),
+      /Invalid configuration for network "mainnet"[\s\S]*DATABASE_MIN_CONNS \(2\) must not be greater than DATABASE_MAX_CONNS \(1\)/,
+    );
+  });
+});
 
 describe("reconciliation", () => {
   test("defaults to a ten-minute interval and a 25-mandate sample", () => {

@@ -439,6 +439,8 @@ examined without API downtime.
 | `RECONCILE_INTERVAL_MS` | `600000` | How often the reconciler re-checks a sample of active mandates against the contract state, in ms |
 | `RECONCILE_SAMPLE_SIZE` | `25` | Active mandates sampled per reconcile pass; each sample costs one read-only RPC simulation |
 | `DATABASE_PATH` | `./payflow.db` | SQLite file |
+| `DATABASE_MAX_CONNS` | `1` | Connections the store may open per database file (max 64) |
+| `DATABASE_MIN_CONNS` | `1` | Connections kept open from startup; never above `DATABASE_MAX_CONNS` |
 | `PORT` | `8080` | HTTP port |
 | `API_RATE_LIMIT_WINDOW_MS` | `60000` | Per-IP API rate-limit window in milliseconds |
 | `API_RATE_LIMIT_MAX` | `120` | Maximum requests per IP in each API rate-limit window |
@@ -497,6 +499,63 @@ ledger numbers, replay windows and outages on one network never affect the
 other. Unprefixed `/api/...` routes always serve the default network
 (`STELLAR_NETWORK`); everything is also reachable under `/api/<name>/...`. The
 keeper settles the default network only.
+
+### Database connection pool
+
+The store opens every SQLite projection through a bounded pool of connections
+(`src/lib/db.ts`). Two variables size it:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_MAX_CONNS` | `1` | Cap on open connections per database file (64 at most) |
+| `DATABASE_MIN_CONNS` | `1` | Connections opened at startup and kept open |
+
+Unset, the numbers are what they have always been: one connection per network,
+opened once and kept for the life of the process. A value that is not a
+positive whole number, or a `DATABASE_MIN_CONNS` above `DATABASE_MAX_CONNS`,
+is a startup error — the service refuses to start rather than open a pool it
+cannot honour.
+
+**Sizing.** The API reads through one shared connection; the long passes — the
+indexer, the reconciler and the keeper — each take a connection of their own
+while the pool has room, so a sweep never competes with API traffic for the
+same handle:
+
+| `DATABASE_MAX_CONNS` | What the service does |
+|---|---|
+| `1` | One connection, as before: every pass and the API share it |
+| `2` | The API keeps the shared connection and the indexer gets one of its own; the reconciler and the keeper share the API's |
+| `3` | The indexer and the reconciler each get one of their own; the keeper shares the API's |
+| `4` | The indexer, the reconciler and the keeper each work on their own connection |
+| `5` and up | The same, with room to spare — raise `DATABASE_MIN_CONNS` to keep the extra handles open from startup |
+
+Every connection is a file handle and SQLite serialises writers, so more
+connections buy isolation, not throughput: `node:sqlite` is synchronous, and a
+statement blocks the event loop either way. `DATABASE_MIN_CONNS` is how many
+handles the pool opens at startup and keeps open, so a burst never pays the
+cost of opening one — set it to the number of connections the service actually
+uses (4 with the keeper and the reconciler on) and `DATABASE_MAX_CONNS` a
+little above that.
+
+**Where the size comes from.** `DATABASE_MAX_CONNS` and `DATABASE_MIN_CONNS`
+apply to every network. A network can size its own pool, and its own value
+wins:
+
+```bash
+NETWORKS=mainnet
+MAINNET_DATABASE_MAX_CONNS=3
+MAINNET_DATABASE_MIN_CONNS=2
+```
+
+Precedence, most specific first: the network's own
+`<NAME>_DATABASE_MAX_CONNS`, then the global `DATABASE_MAX_CONNS`, then the
+built-in default of 1.
+
+Unlike a Postgres connection string, which carries `pool_max_conns` and
+`pool_min_conns` next to the host and the password, `DATABASE_PATH` here is a
+plain file path and carries no pool options — so there is never a question of
+which of the two wins. The variables above are the only source of the pool
+size.
 
 
 ## Deployment

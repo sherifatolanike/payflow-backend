@@ -21,6 +21,12 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+/**
+ * Upper bound on the connections a pool may open. SQLite needs a file handle
+ * per connection, so a typo in a pool size must not open thousands of them.
+ */
+const MAX_DATABASE_CONNS = 64;
+
 const contractId = z
   .string()
   .refine((value) => StrKey.isValidContract(value), "must be a valid Stellar contract ID");
@@ -122,6 +128,30 @@ const schema = z.object({
   API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   API_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   DATABASE_PATH: z.string().default("./payflow.db"),
+  /**
+   * Connections the store may open per database file. One -- the default --
+   * is what the service did before the pool existed: a single handle per
+   * network. Raise it to give the indexer and keeper passes a handle of their
+   * own, so a sweep never shares one with API traffic; see the README for
+   * sizing.
+   */
+  DATABASE_MAX_CONNS: z.coerce
+    .number({ error: "must be a number" })
+    .int("must be a whole number")
+    .min(1, "must be at least 1")
+    .max(MAX_DATABASE_CONNS, `must be at most ${MAX_DATABASE_CONNS}`)
+    .default(1),
+  /**
+   * Connections the store opens when it starts and keeps open, so a burst of
+   * traffic never pays the cost of opening one. Never above
+   * `DATABASE_MAX_CONNS`.
+   */
+  DATABASE_MIN_CONNS: z.coerce
+    .number({ error: "must be a number" })
+    .int("must be a whole number")
+    .min(1, "must be at least 1")
+    .max(MAX_DATABASE_CONNS, `must be at most ${MAX_DATABASE_CONNS}`)
+    .default(1),
   CORS_ORIGIN: z.string().default("*"),
   LOG_LEVEL: z.string().default("info"),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
@@ -147,6 +177,16 @@ export interface NetworkConfig {
   startLedger: number;
   /** SQLite file holding this network's projection. */
   databasePath: string;
+  /**
+   * Connections this network's store may open. The network's own
+   * `<NAME>_DATABASE_MAX_CONNS` wins over the global `DATABASE_MAX_CONNS`.
+   */
+  maxConns: number;
+  /**
+   * Connections this network's store keeps open from the start. The network's
+   * own `<NAME>_DATABASE_MIN_CONNS` wins over the global `DATABASE_MIN_CONNS`.
+   */
+  minConns: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -159,6 +199,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (parsed.data.KEEPER_ENABLED && !parsed.data.KEEPER_SECRET) {
     throw new Error("KEEPER_ENABLED=true requires KEEPER_SECRET to be set");
+  }
+  if (parsed.data.DATABASE_MIN_CONNS > parsed.data.DATABASE_MAX_CONNS) {
+    throw new Error(
+      `Invalid environment configuration: DATABASE_MIN_CONNS (${parsed.data.DATABASE_MIN_CONNS}) must not be greater than DATABASE_MAX_CONNS (${parsed.data.DATABASE_MAX_CONNS})`,
+    );
   }
   return parsed.data;
 }
@@ -196,6 +241,8 @@ export function networkConfigs(config: Config, env: NodeJS.ProcessEnv = process.
       subscriptionId: config.SUBSCRIPTION_ID,
       startLedger: config.INDEXER_START_LEDGER,
       databasePath: config.DATABASE_PATH,
+      maxConns: config.DATABASE_MAX_CONNS,
+      minConns: config.DATABASE_MIN_CONNS,
     },
     ...names.map((name) => extraNetwork(name, config, env)),
   ];
@@ -211,6 +258,20 @@ function extraNetwork(name: string, base: Config, env: NodeJS.ProcessEnv): Netwo
     [`${prefix}_SUBSCRIPTION_ID`]: contractId,
     [`${prefix}_INDEXER_START_LEDGER`]: z.coerce.number().int().nonnegative().default(0),
     [`${prefix}_DATABASE_PATH`]: z.string().min(1).optional(),
+    // A network's own pool size wins over the global one; unset, the global
+    // value applies.
+    [`${prefix}_DATABASE_MAX_CONNS`]: z.coerce
+      .number({ error: "must be a number" })
+      .int("must be a whole number")
+      .min(1, "must be at least 1")
+      .max(MAX_DATABASE_CONNS, `must be at most ${MAX_DATABASE_CONNS}`)
+      .optional(),
+    [`${prefix}_DATABASE_MIN_CONNS`]: z.coerce
+      .number({ error: "must be a number" })
+      .int("must be a whole number")
+      .min(1, "must be at least 1")
+      .max(MAX_DATABASE_CONNS, `must be at most ${MAX_DATABASE_CONNS}`)
+      .optional(),
   });
   const parsed = schema.safeParse(env);
   if (!parsed.success) {
@@ -221,6 +282,13 @@ function extraNetwork(name: string, base: Config, env: NodeJS.ProcessEnv): Netwo
   }
   const data = parsed.data as unknown as Record<string, string | number | undefined>;
   const databasePath = data[`${prefix}_DATABASE_PATH`];
+  const maxConns = Number(data[`${prefix}_DATABASE_MAX_CONNS`] ?? base.DATABASE_MAX_CONNS);
+  const minConns = Number(data[`${prefix}_DATABASE_MIN_CONNS`] ?? base.DATABASE_MIN_CONNS);
+  if (minConns > maxConns) {
+    throw new Error(
+      `Invalid configuration for network "${name}": DATABASE_MIN_CONNS (${minConns}) must not be greater than DATABASE_MAX_CONNS (${maxConns})`,
+    );
+  }
   return {
     name,
     rpcUrl: String(data[`${prefix}_SOROBAN_RPC_URL`]),
@@ -231,6 +299,8 @@ function extraNetwork(name: string, base: Config, env: NodeJS.ProcessEnv): Netwo
     startLedger: Number(data[`${prefix}_INDEXER_START_LEDGER`] ?? 0),
     databasePath:
       databasePath === undefined ? databasePathFor(base.DATABASE_PATH, name) : String(databasePath),
+    maxConns,
+    minConns,
   };
 }
 
